@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>משמרת של אמפתיה</title>
+<style>
+:root{--ink:#302b27;--paper:#faf7f1;--muted:#776f69;--ok:#4f8a6e;--bad:#b85c4f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;-webkit-tap-highlight-color:transparent}
+.wrap{max-width:760px;margin:auto;padding:14px 14px 40px}
+.top{display:flex;align-items:center;gap:8px}
+.brand{font-size:20px;font-weight:900}
+.conn{margin-right:auto;font-size:12px;padding:4px 10px;border-radius:99px;background:#e5f0ea;color:#35604c}
+.conn.off{background:#f6e1dd;color:#8a3b30}
+.card{background:#fffdf9;border:1px solid #e9e0d7;border-radius:24px;padding:18px;margin:10px 0;box-shadow:0 8px 28px #5b4b3b18}
+.center{text-align:center}
+.btn{display:block;width:100%;padding:15px;border:0;border-radius:15px;background:var(--ink);color:#fff;font-weight:800;font-size:16px;margin-top:8px;cursor:pointer;font-family:inherit}
+.btn:disabled{opacity:.5}
+.alt{background:#e9e1d8;color:var(--ink)}
+input{width:100%;padding:14px;border:1px solid #ddd1c7;border-radius:14px;margin:6px 0;font-size:16px;font-family:inherit}
+.players{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.player{padding:10px;border:1px solid #e7ded5;border-radius:16px;display:flex;gap:8px;align-items:center;background:#fff;min-width:0}
+.player.off{opacity:.45}.player.done{border-color:var(--ok);background:#eef6f1}
+.player .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ico{font-size:26px}
+.score{margin-right:auto;font-weight:900}
+.x{border:0;background:none;color:var(--bad);font-size:18px;cursor:pointer}
+.art{width:100%;height:auto;aspect-ratio:500/260;border-radius:18px;margin-bottom:12px;display:block}
+.timer{font-size:48px;font-weight:950;text-align:center}
+.timer.low{color:var(--bad)}
+.choices{display:grid;gap:9px}
+.choice{padding:14px;border:2px solid transparent;border-radius:16px;background:#f2ede7;text-align:right;font-weight:700;font-size:16px;font-family:inherit;color:var(--ink);cursor:pointer}
+.choice.sel{border-color:#668d7c;background:#e5f0ea}
+.choice.right{border-color:var(--ok);background:#dff0e6}
+.choice.wrong{border-color:var(--bad);background:#f7e3df}
+.choice:disabled{cursor:default}
+.rank{display:flex;justify-content:space-between;gap:8px;padding:10px;border-bottom:1px solid #eee5dd}
+.small{font-size:13px;color:var(--muted)}
+.code{font-size:40px;letter-spacing:6px;font-weight:950;direction:ltr}
+.link{direction:ltr;word-break:break-all;font-size:13px;background:#f2ede7;padding:8px;border-radius:10px}
+.banner{padding:12px;border-radius:14px;font-weight:800;text-align:center}
+.banner.ok{background:#dff0e6;color:#2f6a4f}.banner.bad{background:#f7e3df;color:#8a3b30}
+@media(min-width:600px){.players{grid-template-columns:repeat(4,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><div class="brand">🩺 משמרת של אמפתיה <span id="room"></span></div><span id="conn" class="conn" hidden></span></div>
+  <div id="app"></div>
+</div>
+<script>
+let CASES = null;
+const app = document.getElementById('app');
+const params = new URLSearchParams(location.search);
+let room = (params.get('room') || '').toUpperCase();
+let role = params.get('role') === 'host' ? 'host' : 'player';
+let ws = null, state = null, myName = '', wantConnected = false, retry = 0, tickTimer = null, lastPhaseKey = '', clockOffset = 0;
+
+// Stable ID so refresh / screen-lock reconnects to the same player (works on http too).
+function uid() {
+  if (window.crypto && crypto.randomUUID) { try { return crypto.randomUUID(); } catch (e) {} }
+  return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+function store(k, v, S) { try { S = S || localStorage; if (v === undefined) return S.getItem(k); S.setItem(k, v); } catch (e) { return null; } }
+// Per-tab ID (survives refresh; lets you test several players in one browser)
+let myId = store('empathy_id', undefined, sessionStorage); if (!myId) { myId = uid(); store('empathy_id', myId, sessionStorage); }
+myName = store('empathy_name') || '';
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const L = i => String.fromCharCode(65 + i);
+
+fetch('content.json').then(r => r.json()).then(v => { CASES = v; if (state) render(); })
+  .catch(() => { app.innerHTML = '<div class="card center">שגיאה בטעינת התוכן. רעננו את הדף.</div>'; });
+
+function art(c, slot) {
+  const glyph = ['◯', '✚', '♡', '⌁', '▣', '♧'][slot % 6];
+  return `<svg class="art" viewBox="0 0 500 260" xmlns="http://www.w3.org/2000/svg"><rect width="500" height="260" rx="25" fill="${c.color}"/><path d="M40 80C120 25 170 70 250 40S400 55 460 95C490 155 430 235 350 225S170 255 65 220C15 180 10 115 40 80Z" fill="${c.accent}" opacity=".16"/><g fill="none" stroke="${c.accent}" stroke-width="7" stroke-linecap="round" opacity=".75"><circle cx="250" cy="130" r="70"/><path d="M205 130h90M250 85v90M215 190c40 25 80 25 115 0"/></g><text x="250" y="150" text-anchor="middle" font-size="58" fill="${c.accent}" opacity=".8">${glyph}</text><path d="M80 225q60-30 120 0t120 0 120 0" fill="none" stroke="${c.accent}" stroke-width="4" opacity=".35"/></svg>`;
+}
+
+function setConn(on) {
+  const el = document.getElementById('conn');
+  el.hidden = false; el.className = 'conn' + (on ? '' : ' off');
+  el.textContent = on ? 'מחובר' : 'מתחבר מחדש…';
+}
+function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
+function connect() {
+  wantConnected = true;
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.onopen = () => { retry = 0; setConn(true); send({ type: 'join', room, name: myName, role, id: myId }); };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'error') {
+      wantConnected = false; ws.close();
+      const msg = m.error === 'full' ? 'המשחק מלא (עד 7 משתתפים).' : 'לא נמצא משחק עם הקוד הזה. בדקו את הקוד.';
+      app.innerHTML = `<div class="card center"><h2>${msg}</h2><button class="btn" onclick="home()">חזרה</button></div>`;
+      return;
+    }
+    if (m.type === 'joined') { role = m.role === 'viewer' ? 'viewer' : m.role; return; }
+    if (m.type === 'state') { state = m.state; clockOffset = state.serverNow - Date.now(); render(); }
+  };
+  ws.onclose = () => {
+    if (!wantConnected) return;
+    setConn(false);
+    setTimeout(connect, Math.min(5000, 500 * 2 ** retry++));
+  };
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && wantConnected) connect(); });
+
+function home() {
+  wantConnected = false; if (ws) ws.close(); state = null; room = '';
+  history.replaceState(null, '', location.pathname);
+  document.getElementById('room').textContent = '';
+  document.getElementById('conn').hidden = true;
+  start();
+}
+function start() {
+  app.innerHTML = `<div class="card center">${art({ color: '#dcefe8', accent: '#5e9c83' }, 0)}<h1>משמרת של אמפתיה</h1><p>משחק קבוצתי לסטודנטים לסיעוד</p><button class="btn" onclick="joinForm()">הצטרפות למשחק</button><button class="btn alt" onclick="host()">פתיחת משחק (מנהל/ת)</button></div>`;
+}
+function joinForm(prefill) {
+  app.innerHTML = `<div class="card"><h2>הצטרפות</h2>${prefill ? `<p>קוד משחק: <b>${esc(prefill)}</b></p><input id="r" type="hidden" value="${esc(prefill)}">` : '<input id="r" placeholder="קוד משחק" autocapitalize="characters" autocomplete="off">'}<input id="n" placeholder="השם שלי" maxlength="24" value="${esc(myName)}"><button class="btn" onclick="doJoin()">כניסה</button><button class="btn alt" onclick="home()">חזרה</button></div>`;
+  document.getElementById(prefill ? 'n' : 'r').focus();
+  app.querySelectorAll('input').forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') doJoin(); }));
+}
+function doJoin() {
+  const r = document.getElementById('r').value.trim().toUpperCase(), n = document.getElementById('n').value.trim();
+  if (!r || !n) { alert('נא למלא קוד ושם'); return; }
+  room = r; role = 'player'; myName = n; store('empathy_name', n);
+  history.replaceState(null, '', '?room=' + encodeURIComponent(r));
+  app.innerHTML = '<div class="card center">מתחבר…</div>';
+  connect();
+}
+function host() {
+  room = Math.random().toString(36).replace(/[^a-z0-9]/g, '').slice(0, 5).toUpperCase().padEnd(5, 'X');
+  role = 'host';
+  history.replaceState(null, '', '?room=' + room + '&role=host');
+  connect();
+}
+function copyLink() {
+  const link = location.origin + location.pathname + '?room=' + state.room;
+  if (navigator.share) navigator.share({ title: 'משמרת של אמפתיה', text: 'קוד משחק: ' + state.room, url: link }).catch(() => {});
+  else if (navigator.clipboard) navigator.clipboard.writeText(link).then(() => alert('הקישור הועתק'));
+}
+
+function players(opts = {}) {
+  return `<div class="players">${state.players.map(p => {
+    const done = opts.answered && state.answers[p.id] !== undefined;
+    const kick = opts.kick ? `<button class="x" title="הסרה" onclick="send({type:'kick',playerId:'${esc(p.id)}'})">✕</button>` : '';
+    return `<div class="player ${p.online ? '' : 'off'} ${done ? 'done' : ''}"><span class="ico">${p.icon}</span><span class="nm">${esc(p.name)}${p.id === myId ? ' (אני)' : ''}</span><span class="score">${done ? '✓' : p.score}</span>${kick}</div>`;
+  }).join('') || '<div class="small">עדיין אין משתתפים</div>'}</div>`;
+}
+function leader(caseOnly) {
+  const k = caseOnly ? ['caseCorrect', 'caseFast'] : ['correct', 'fastCount'];
+  return [...state.players].sort((a, b) => caseOnly
+      ? (b.caseCorrect - a.caseCorrect || b.caseFast - a.caseFast || b.score - a.score)
+      : (b.score - a.score || b.correct - a.correct || b.fastCount - a.fastCount))
+    .map((p, i) => `<div class="rank"><span>${['🥇', '🥈', '🥉'][i] || i + 1} ${p.icon} ${esc(p.name)}</span><span>${caseOnly ? '' : p.score + " נק' · "}${p[k[0]]} נכונות · ${p[k[1]]} מהירות</span></div>`).join('');
+}
+const hostBtn = (type, label) => role === 'host' ? `<button class="btn" onclick="send({type:'${type}'})">${label}</button>` : '';
+const waitHost = txt => role === 'host' ? '' : `<div class="card center small">${txt || 'ממתינים למנהל/ת…'}</div>`;
+
+function render() {
+  if (!state) return;
+  document.getElementById('room').textContent = ' · ' + state.room;
+  if (!CASES) { app.innerHTML = '<div class="card center">טוען…</div>'; return; }
+  const c = CASES[Math.min(state.caseIndex, CASES.length - 1)];
+  const key = state.phase + state.caseIndex + '-' + state.qIndex;
+  const phaseChanged = key !== lastPhaseKey; lastPhaseKey = key;
+  if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+
+  if (state.phase === 'lobby') {
+    const link = location.origin + location.pathname + '?room=' + state.room;
+    app.innerHTML = `<div class="card center"><div class="small">קוד משחק</div><div class="code">${esc(state.room)}</div>${role === 'host' ? `<div class="link">${esc(link)}</div><button class="btn alt" onclick="copyLink()">שיתוף קישור</button>` : '<p>נכנסת! ממתינים שהמנהל/ת יתחיל/תתחיל.</p>'}</div>
+      <div class="card"><h3>המשתתפים (${state.players.length}/7)</h3>${players({ kick: role === 'host' })}</div>
+      ${role === 'host' ? `<button class="btn" ${state.players.length ? '' : 'disabled'} onclick="send({type:'start'})">התחלת המשחק</button>` : ''}`;
+  } else if (state.phase === 'case') {
+    const iRead = state.reader && state.reader.id === myId;
+    app.innerHTML = `<div class="card" style="background:${c.color}">${art(c, 0)}<div class="small">מקרה ${state.caseIndex + 1} מתוך ${state.totalCases}</div><h2>${esc(c.title)}</h2><p style="font-size:18px;line-height:1.7">${esc(c.case)}</p><p><b>🎙️ הקורא/ת:</b> ${state.reader ? state.reader.icon + ' ' + esc(state.reader.name) : ''}</p></div>
+      ${iRead ? '<div class="banner ok">את/ה מקריא/ה את המקרה בקול 🎙️</div>' : ''}
+      ${hostBtn('question', 'הצגת שאלה 1')}${waitHost()}`;
+  } else if (state.phase === 'question') {
+    const q = c.questions[state.qIndex], mine = state.answers[myId], chosen = mine ? mine.choice : undefined;
+    const canAnswer = role === 'player' && chosen === undefined && state.players.some(p => p.id === myId);
+    app.innerHTML = `<div class="card" style="background:${c.color}">${art(c, state.qIndex + 1)}<div class="small">מקרה ${state.caseIndex + 1} · שאלה ${state.qIndex + 1} מתוך ${c.questions.length}</div><div class="timer" id="t"></div><h2>${esc(q.q)}</h2>
+      <div class="choices">${q.a.map((x, i) => `<button class="choice ${chosen === i ? 'sel' : ''}" ${canAnswer ? '' : 'disabled'} onclick="answer(${i})">${L(i)}. ${esc(x)}</button>`).join('')}</div>
+      ${chosen !== undefined ? '<p class="center small">התשובה נשלחה ✓</p>' : ''}</div>
+      <div class="card"><h3>מי ענה (${Object.keys(state.answers).length}/${state.players.filter(p => p.online).length})</h3>${players({ answered: true })}</div>
+      ${hostBtn('reveal', 'חשיפת התשובה עכשיו')}`;
+    tick();
+  } else if (state.phase === 'reveal') {
+    const q = c.questions[state.qIndex], mine = state.answers[myId];
+    let banner = '';
+    if (role === 'player' && state.players.some(p => p.id === myId)) {
+      banner = !mine ? '<div class="banner bad">לא נשלחה תשובה ⏱️</div>'
+        : mine.choice === q.answer ? `<div class="banner ok">נכון! +100 ${mine.ms <= 4000 ? '⚡ מהיר' : ''}</div>` : '<div class="banner bad">לא הפעם</div>';
+    }
+    const last = state.qIndex >= c.questions.length - 1;
+    app.innerHTML = `${banner}<div class="card" style="background:${c.color}"><h2>${esc(q.q)}</h2><div class="choices">${q.a.map((x, i) => `<button class="choice ${i === q.answer ? 'right' : (mine && mine.choice === i ? 'wrong' : '')}" disabled>${L(i)}. ${esc(x)}${i === q.answer ? ' ✓' : ''}</button>`).join('')}</div></div>
+      <div class="card"><h3>ניקוד</h3>${players()}</div>${hostBtn('next', last ? 'מה למדנו?' : 'לשאלה הבאה')}${waitHost()}`;
+  } else if (state.phase === 'learn') {
+    const last = state.caseIndex >= state.totalCases - 1;
+    app.innerHTML = `<div class="card" style="background:${c.color}">${art(c, 5)}<h2>מה למדנו?</h2><p style="font-size:18px;line-height:1.7">${esc(c.learn)}</p></div>
+      <div class="card"><h3>מצטיינים במקרה</h3>${leader(true)}</div>${hostBtn('nextCase', last ? 'לתוצאות הסופיות 🏆' : 'למקרה הבא')}${waitHost()}`;
+  } else if (state.phase === 'final') {
+    app.innerHTML = `<div class="card center">${art({ color: '#f6ead2', accent: '#b08a3e' }, 2)}<h1>🏆 אלופי משמרת האמפתיה</h1>${state.players.length ? `<p style="font-size:22px">${state.players.slice().sort((a, b) => b.score - a.score || b.correct - a.correct || b.fastCount - a.fastCount)[0].icon} ${esc(state.players.slice().sort((a, b) => b.score - a.score || b.correct - a.correct || b.fastCount - a.fastCount)[0].name)}</p>` : ''}</div>
+      <div class="card"><h3>דירוג סופי</h3>${leader(false)}</div>${hostBtn('restart', 'משחק חדש עם אותה קבוצה')}`;
+  }
+  if (phaseChanged) window.scrollTo(0, 0);
+}
+function answer(i) {
+  send({ type: 'answer', answer: i });
+  app.querySelectorAll('.choice').forEach((b, j) => { b.disabled = true; if (j === i) b.classList.add('sel'); });
+}
+function tick() {
+  const f = () => {
+    const el = document.getElementById('t'); if (!el || !state || state.phase !== 'question') return;
+    const left = Math.max(0, Math.ceil((state.questionMs - (Date.now() + clockOffset - state.questionStartedAt)) / 1000));
+    el.textContent = left; el.classList.toggle('low', left <= 3);
+  };
+  f(); tickTimer = setInterval(f, 200);
+}
+
+// Boot
+if (room && role === 'host') connect();
+else if (room && myName) { app.innerHTML = '<div class="card center">מתחבר…</div>'; connect(); }
+else if (room) joinForm(room);
+else start();
+</script>
+</body>
+</html>
